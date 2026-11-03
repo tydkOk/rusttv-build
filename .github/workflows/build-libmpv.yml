@@ -1,17 +1,10 @@
+
 # Builds libmpv.so (both armeabi-v7a and arm64-v8a) using the official
-# mpv-android build pipeline on GitHub's Linux runners — this sidesteps
-# Windows entirely (mpv-android's buildscripts officially do NOT support
-# Windows/WSL).
+# mpv-android build pipeline on GitHub's Linux runners.
 #
-# How to use (see README-发布步骤.md next to this file):
-#   1. Create a public GitHub repo, add this file as
-#      .github/workflows/build-libmpv.yml
-#   2. The workflow runs on push (or run it manually from the Actions tab)
-#   3. After ~40-60 min, download the `libmpv-so` artifact
-#
-# The build recipe mirrors mpv-android's own .github/workflows/build.yml,
-# with one addition: instead of (only) their APKs, we package the
-# libmpv.so files themselves for easy reuse in our app.
+# v2: hardened "Install build packages" — tolerates apt mirror hiccups, both
+# spellings of pkg-config, PEP 668 (externally-managed pip), and runners
+# without sudo. Diagnostics are printed so failures are self-explaining.
 
 name: Build libmpv for rusttv
 
@@ -45,11 +38,24 @@ jobs:
           key: "${{ env.CACHE_IDENTIFIER }}"
           enableCrossOsArchive: true
 
-      - name: Install build packages
+      - name: Install build packages (hardened)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y autoconf pkgconfig libtool ninja-build python3-pip gperf nasm
-          sudo pip3 install meson
+          set -x
+          # Some runners ship without sudo (root user); some apt mirrors fail.
+          SUDO=sudo; command -v sudo >/dev/null 2>&1 || SUDO=
+          $SUDO apt-get update || echo "::warning::apt-get update failed, continuing with cached index"
+          # 24.04 has pkg-config/pkgconf; older names may differ — try both.
+          $SUDO apt-get install -y autoconf libtool ninja-build python3-pip gperf nasm pkg-config \
+            || $SUDO apt-get install -y autoconf libtool ninja-build python3-pip gperf nasm pkgconfig
+          # Ubuntu 24.04 marks system python as externally managed (PEP 668):
+          # plain pip3 install refuses without --break-system-packages.
+          $SUDO pip3 install meson \
+            || $SUDO pip3 install --break-system-packages meson \
+            || $SUDO apt-get install -y meson
+          echo "--- tool availability ---"
+          for t in meson ninja nasm pkg-config autoconf libtool gperf; do
+            command -v "$t" >/dev/null 2>&1 && echo "OK   $t" || echo "MISS $t"
+          done
 
       - name: Download or build dependencies
         run: |
@@ -64,7 +70,6 @@ jobs:
 
       - name: Collect libmpv libraries
         run: |
-          # Show what the build produced, then stage the .so files we need.
           find app/src/main/jniLibs -name '*.so' -exec ls -lh {} \; || true
           mkdir -p dist
           for abi in armeabi-v7a arm64-v8a; do
