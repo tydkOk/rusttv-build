@@ -1,0 +1,94 @@
+# Builds libmpv.so (both armeabi-v7a and arm64-v8a) using the official
+# mpv-android build pipeline on GitHub's Linux runners — this sidesteps
+# Windows entirely (mpv-android's buildscripts officially do NOT support
+# Windows/WSL).
+#
+# How to use (see README-发布步骤.md next to this file):
+#   1. Create a public GitHub repo, add this file as
+#      .github/workflows/build-libmpv.yml
+#   2. The workflow runs on push (or run it manually from the Actions tab)
+#   3. After ~40-60 min, download the `libmpv-so` artifact
+#
+# The build recipe mirrors mpv-android's own .github/workflows/build.yml,
+# with one addition: instead of (only) their APKs, we package the
+# libmpv.so files themselves for easy reuse in our app.
+
+name: Build libmpv for rusttv
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  libmpv:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out mpv-android source
+        uses: actions/checkout@v4
+        with:
+          repository: mpv-android/mpv-android
+          ref: master
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Export build environment
+        run: buildscripts/include/ci.sh export >> "$GITHUB_ENV"
+
+      - name: Cache dependency downloads
+        uses: actions/cache@v4
+        with:
+          path: gh-cache/
+          key: "${{ env.CACHE_IDENTIFIER }}"
+          enableCrossOsArchive: true
+
+      - name: Install build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf pkgconfig libtool ninja-build python3-pip gperf nasm
+          sudo pip3 install meson
+
+      - name: Download or build dependencies
+        run: |
+          mkdir -p "$CACHE_FOLDER"
+          buildscripts/include/ci.sh install
+        env:
+          CACHE_MODE: "folder"
+          CACHE_FOLDER: "${{ github.workspace }}/gh-cache"
+
+      - name: Build libmpv (both ABIs)
+        run: buildscripts/include/ci.sh build
+
+      - name: Collect libmpv libraries
+        run: |
+          # Show what the build produced, then stage the .so files we need.
+          find app/src/main/jniLibs -name '*.so' -exec ls -lh {} \; || true
+          mkdir -p dist
+          for abi in armeabi-v7a arm64-v8a; do
+            if [ -f "app/src/main/jniLibs/$abi/libmpv.so" ]; then
+              mkdir -p "dist/$abi"
+              cp "app/src/main/jniLibs/$abi/libmpv.so" "dist/$abi/"
+            else
+              echo "WARNING: libmpv.so not found for $abi" >&2
+            fi
+          done
+          ls -lhR dist
+
+      - name: Upload libmpv libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmpv-so
+          path: dist/
+          if-no-files-found: error
+
+      # Backup: if the jniLibs path assumption above is ever wrong, the .so
+      # can be extracted from these reference APKs instead.
+      - name: Upload reference APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpv-android-reference-apks
+          path: app/build/outputs/apk/**/debug/*.apk
+          if-no-files-found: ignore
